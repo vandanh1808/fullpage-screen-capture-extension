@@ -1,9 +1,29 @@
 importScripts("libs/jszip.min.js", "libs/jspdf.umd.min.js");
 
-// ── Persistent state (survives popup close/reopen) ────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Constants
+// ═══════════════════════════════════════════════════════════════════
+
+const CAPTURE_INTERVAL_MS = 600;
+const SCROLL_SETTLE_MS = 500;
+const AUTO_RESET_DONE_MS = 30_000;
+const AUTO_RESET_ERROR_MS = 10_000;
+const DEFAULT_OVERLAP_PCT = 0;
+const PDF_WIDTH_MM = 210;
+const LONG_PDF_SEAM_BUFFER_MM = 1;
+
+const FORMAT_LABELS = {
+  pdf: "Generating PDF...",
+  longpdf: "Stitching Long PDF...",
+  zip: "Packing ZIP...",
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// State management
+// ═══════════════════════════════════════════════════════════════════
 
 let captureState = {
-  status: "idle", // idle | selecting | capturing | packing | done | error
+  status: "idle",
   current: 0,
   total: 0,
   phase: "",
@@ -11,13 +31,11 @@ let captureState = {
   error: "",
   format: "zip",
   mode: "fullpage",
-  overlap: 15,
+  overlap: DEFAULT_OVERLAP_PCT,
   downloadFilename: "",
 };
 
-let pendingAreaTabId = null;
-let pendingAreaFormat = "zip";
-let pendingAreaOverlap = 15;
+let pendingArea = { tabId: null, format: "zip", overlap: DEFAULT_OVERLAP_PCT };
 
 function updateState(patch) {
   Object.assign(captureState, patch);
@@ -28,103 +46,131 @@ function resetToIdle() {
   updateState({ status: "idle" });
 }
 
+function scheduleAutoReset(status, delayMs) {
+  setTimeout(() => {
+    if (captureState.status === status) resetToIdle();
+  }, delayMs);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Message router
+// ═══════════════════════════════════════════════════════════════════
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.action === "startCapture" && captureState.status === "idle") {
-    updateState({
-      status: "capturing",
-      current: 0,
-      total: 0,
-      phase: "Starting...",
-      startTime: Date.now(),
-      error: "",
-      format: msg.format,
-      mode: "fullpage",
-      overlap: msg.overlap ?? 15,
-      downloadFilename: "",
-    });
-    startCapture(msg.tabId, msg.format, msg.overlap ?? 15);
-    sendResponse({ started: true });
-  } else if (msg.action === "startAreaSelect" && captureState.status === "idle") {
-    pendingAreaTabId = msg.tabId;
-    pendingAreaFormat = msg.format || "zip";
-    pendingAreaOverlap = msg.overlap ?? 15;
-    updateState({
-      status: "selecting",
-      mode: "area",
-      format: pendingAreaFormat,
-      overlap: pendingAreaOverlap,
-      startTime: Date.now(),
-      error: "",
-      downloadFilename: "",
-    });
-    chrome.scripting.executeScript({
-      target: { tabId: msg.tabId },
-      files: ["selector.js"],
-    });
-    sendResponse({ started: true });
-  } else if (msg.action === "areaSelected") {
-    const tabId = pendingAreaTabId || (sender.tab && sender.tab.id);
-    if (tabId && msg.rect) {
-      updateState({
-        status: "capturing",
-        phase: "Starting area capture...",
-        startTime: Date.now(),
-        current: 0,
-        total: 0,
-      });
-      startAreaCapture(tabId, pendingAreaFormat, msg.rect, pendingAreaOverlap);
-    }
-  } else if (msg.action === "areaSelectCancelled") {
-    resetToIdle();
-  } else if (msg.action === "getState") {
-    sendResponse({ state: { ...captureState } });
-  }
+  const handlers = {
+    startCapture: () => handleStartCapture(msg, sendResponse),
+    startAreaSelect: () => handleStartAreaSelect(msg, sendResponse),
+    areaSelected: () => handleAreaSelected(msg, sender),
+    areaSelectCancelled: () => resetToIdle(),
+    getState: () => sendResponse({ state: { ...captureState } }),
+  };
+
+  const handler = handlers[msg.action];
+  if (handler) handler();
   return true;
 });
 
-// ── Debugger helpers ──────────────────────────────────────────────
+function canStartNew() {
+  return captureState.status === "idle" || captureState.status === "done" || captureState.status === "error";
+}
 
-function debuggerAttach(tabId) {
+function handleStartCapture(msg, sendResponse) {
+  if (!canStartNew()) return;
+
+  const overlapPct = msg.overlap ?? DEFAULT_OVERLAP_PCT;
+  updateState({
+    status: "capturing",
+    current: 0,
+    total: 0,
+    phase: "Starting...",
+    startTime: Date.now(),
+    error: "",
+    format: msg.format,
+    mode: "fullpage",
+    overlap: overlapPct,
+    downloadFilename: "",
+  });
+  runFullPageCapture(msg.tabId, msg.format, overlapPct);
+  sendResponse({ started: true });
+}
+
+function handleStartAreaSelect(msg, sendResponse) {
+  if (!canStartNew()) return;
+
+  pendingArea = {
+    tabId: msg.tabId,
+    format: msg.format || "zip",
+    overlap: msg.overlap ?? DEFAULT_OVERLAP_PCT,
+  };
+  updateState({
+    status: "selecting",
+    mode: "area",
+    format: pendingArea.format,
+    overlap: pendingArea.overlap,
+    startTime: Date.now(),
+    error: "",
+    downloadFilename: "",
+  });
+  chrome.scripting.executeScript({
+    target: { tabId: msg.tabId },
+    files: ["selector.js"],
+  });
+  sendResponse({ started: true });
+}
+
+function handleAreaSelected(msg, sender) {
+  const tabId = pendingArea.tabId || (sender.tab && sender.tab.id);
+  if (!tabId || !msg.rect) return;
+
+  updateState({
+    status: "capturing",
+    phase: "Starting area capture...",
+    startTime: Date.now(),
+    current: 0,
+    total: 0,
+  });
+  runAreaCapture(tabId, pendingArea.format, msg.rect, pendingArea.overlap);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Chrome Debugger Protocol (CDP) helpers
+// ═══════════════════════════════════════════════════════════════════
+
+function cdpAttach(tabId) {
   return new Promise((resolve, reject) => {
     chrome.debugger.attach({ tabId }, "1.3", () => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-      } else {
-        resolve();
-      }
+      chrome.runtime.lastError
+        ? reject(new Error(chrome.runtime.lastError.message))
+        : resolve();
     });
   });
 }
 
-function debuggerDetach(tabId) {
+function cdpDetach(tabId) {
   return new Promise((resolve) => {
     chrome.debugger.detach({ tabId }, () => resolve());
   });
 }
 
-function debuggerSendCommand(tabId, method, params = {}) {
+function cdpSend(tabId, method, params = {}) {
   return new Promise((resolve, reject) => {
     chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-      } else {
-        resolve(result);
-      }
+      chrome.runtime.lastError
+        ? reject(new Error(chrome.runtime.lastError.message))
+        : resolve(result);
     });
   });
 }
 
-async function captureTab(tabId, clip) {
+async function cdpCaptureScreenshot(tabId, clip) {
   const params = { format: "png", fromSurface: true };
-  if (clip) {
-    params.clip = { ...clip, scale: 1 };
-  }
-  const result = await debuggerSendCommand(tabId, "Page.captureScreenshot", params);
-  return "data:image/png;base64," + result.data;
+  if (clip) params.clip = { ...clip, scale: 1 };
+  const { data } = await cdpSend(tabId, "Page.captureScreenshot", params);
+  return "data:image/png;base64," + data;
 }
 
-async function evalInTab(tabId, expression) {
-  const result = await debuggerSendCommand(tabId, "Runtime.evaluate", {
+async function cdpEval(tabId, expression) {
+  const result = await cdpSend(tabId, "Runtime.evaluate", {
     expression,
     returnByValue: true,
   });
@@ -134,377 +180,291 @@ async function evalInTab(tabId, expression) {
   return result.result.value;
 }
 
-// ── CDP-based scroll functions (work in background tabs) ──────────
+// ═══════════════════════════════════════════════════════════════════
+// In-tab scroll operations (via CDP, works on background tabs)
+// ═══════════════════════════════════════════════════════════════════
 
-async function getPageInfo(tabId) {
-  return await evalInTab(
-    tabId,
-    `(() => {
-      function findScroller() {
-        if (document.documentElement.scrollHeight > window.innerHeight + 10) {
-          const hs = getComputedStyle(document.documentElement).overflowY;
-          const bs = getComputedStyle(document.body).overflowY;
-          if (hs !== "hidden" && bs !== "hidden") return null;
-        }
-        let best = null, bestArea = 0;
-        for (const el of document.querySelectorAll("*")) {
-          const s = getComputedStyle(el);
-          if ((s.overflowY === "auto" || s.overflowY === "scroll") &&
-              el.scrollHeight > el.clientHeight + 10) {
-            const area = el.clientWidth * el.clientHeight;
-            if (area > bestArea) { best = el; bestArea = area; }
-          }
-        }
-        return best;
+/**
+ * Detect the scrollable container and cache it on `window.__captureScroller`.
+ * Returns { scrollHeight, viewportHeight } and resets scroll to top.
+ */
+function initPageScroller(tabId) {
+  return cdpEval(tabId, `(() => {
+    function findScroller() {
+      if (document.documentElement.scrollHeight > window.innerHeight + 10) {
+        const hs = getComputedStyle(document.documentElement).overflowY;
+        const bs = getComputedStyle(document.body).overflowY;
+        if (hs !== "hidden" && bs !== "hidden") return null;
       }
-      const scroller = findScroller();
-      window.__captureScroller = scroller;
-      const scrollHeight = scroller ? scroller.scrollHeight : Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
-      const viewportHeight = scroller ? scroller.clientHeight : window.innerHeight;
-      if (scroller) scroller.scrollTop = 0;
-      else window.scrollTo(0, 0);
-      return { scrollHeight, viewportHeight };
-    })()`
-  );
-}
-
-async function scrollDown(tabId, overlap) {
-  return await evalInTab(
-    tabId,
-    `(() => {
-      const scroller = window.__captureScroller;
-      const overlapPx = ${overlap};
-      const vh = scroller ? scroller.clientHeight : window.innerHeight;
-      const currentScroll = scroller ? scroller.scrollTop : window.scrollY;
-      const totalHeight = scroller
-        ? scroller.scrollHeight
-        : Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
-      const maxScroll = totalHeight - vh;
-      const step = vh - overlapPx;
-
-      const target = Math.min(currentScroll + step, maxScroll);
-      if (scroller) scroller.scrollTop = target;
-      else window.scrollTo(0, target);
-
-      const actual = scroller ? scroller.scrollTop : window.scrollY;
-      return { done: actual >= maxScroll - 2, scrollY: actual };
-    })()`
-  );
-}
-
-async function scrollByAmount(tabId, amount) {
-  return await evalInTab(
-    tabId,
-    `(() => {
-      const scroller = window.__captureScroller;
-      if (scroller) {
-        const maxScroll = scroller.scrollHeight - scroller.clientHeight;
-        scroller.scrollTop = Math.min(scroller.scrollTop + ${amount}, maxScroll);
-        return { done: scroller.scrollTop >= maxScroll - 2 };
-      } else {
-        const maxScroll = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight) - window.innerHeight;
-        window.scrollTo(0, Math.min(window.scrollY + ${amount}, maxScroll));
-        return { done: window.scrollY >= maxScroll - 2 };
+      let best = null, bestArea = 0;
+      for (const el of document.querySelectorAll("*")) {
+        const s = getComputedStyle(el);
+        if ((s.overflowY === "auto" || s.overflowY === "scroll") &&
+            el.scrollHeight > el.clientHeight + 10) {
+          const area = el.clientWidth * el.clientHeight;
+          if (area > bestArea) { best = el; bestArea = area; }
+        }
       }
-    })()`
-  );
+      return best;
+    }
+    const scroller = findScroller();
+    window.__captureScroller = scroller;
+    const scrollHeight = scroller
+      ? scroller.scrollHeight
+      : Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+    const viewportHeight = scroller ? scroller.clientHeight : window.innerHeight;
+    if (scroller) scroller.scrollTop = 0; else window.scrollTo(0, 0);
+    return { scrollHeight, viewportHeight };
+  })()`);
 }
 
-async function scrollToTop(tabId) {
-  await evalInTab(
-    tabId,
-    `(() => {
-      const scroller = window.__captureScroller;
-      if (scroller) scroller.scrollTop = 0;
-      else window.scrollTo(0, 0);
-    })()`
-  );
+function scrollByStep(tabId, overlapPx) {
+  return cdpEval(tabId, `(() => {
+    const s = window.__captureScroller;
+    const vh = s ? s.clientHeight : window.innerHeight;
+    const cur = s ? s.scrollTop : window.scrollY;
+    const max = (s ? s.scrollHeight : Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)) - vh;
+    const target = Math.min(cur + vh - ${overlapPx}, max);
+    if (s) s.scrollTop = target; else window.scrollTo(0, target);
+    const actual = s ? s.scrollTop : window.scrollY;
+    return { done: actual >= max - 2, scrollY: actual };
+  })()`);
 }
 
-// ── Area capture flow (scroll + clip) ─────────────────────────────
+function scrollByAmount(tabId, amount) {
+  return cdpEval(tabId, `(() => {
+    const s = window.__captureScroller;
+    const max = (s ? s.scrollHeight - s.clientHeight : Math.max(document.body.scrollHeight, document.documentElement.scrollHeight) - window.innerHeight);
+    const target = Math.min((s ? s.scrollTop : window.scrollY) + ${amount}, max);
+    if (s) s.scrollTop = target; else window.scrollTo(0, target);
+    const actual = s ? s.scrollTop : window.scrollY;
+    return { done: actual >= max - 2 };
+  })()`);
+}
 
-async function startAreaCapture(tabId, format, rect, overlapPct) {
-  const MIN_CAPTURE_INTERVAL = 600;
+function scrollToTop(tabId) {
+  return cdpEval(tabId, `(() => {
+    const s = window.__captureScroller;
+    if (s) s.scrollTop = 0; else window.scrollTo(0, 0);
+  })()`);
+}
 
+// ═══════════════════════════════════════════════════════════════════
+// Shared capture loop
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Core scroll-and-capture loop used by both full-page and area modes.
+ *
+ * @param {number}   tabId       - Target tab
+ * @param {object}   [clip]      - CDP clip rect (null for full viewport)
+ * @param {function} scrollFn    - Async function that scrolls and returns { done }
+ * @param {number}   estTotal    - Estimated total parts for progress display
+ * @param {string}   phasePrefix - Label prefix for progress updates
+ * @returns {Promise<string[]>}  - Array of data-URL screenshots
+ */
+async function captureLoop(tabId, clip, scrollFn, estTotal, phasePrefix) {
+  const screenshots = [];
+  let partIndex = 0;
+  let reachedEnd = false;
+
+  while (true) {
+    partIndex++;
+    updateState({
+      current: partIndex,
+      total: Math.max(estTotal, partIndex),
+      phase: `${phasePrefix} ${partIndex}...`,
+    });
+
+    screenshots.push(await cdpCaptureScreenshot(tabId, clip));
+
+    if (reachedEnd) break;
+
+    const result = await scrollFn();
+    reachedEnd = result.done;
+    await sleep(CAPTURE_INTERVAL_MS);
+  }
+
+  return screenshots;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Capture flows
+// ═══════════════════════════════════════════════════════════════════
+
+async function runFullPageCapture(tabId, format, overlapPct) {
   try {
-    await debuggerAttach(tabId);
+    await cdpAttach(tabId);
+    const { scrollHeight, viewportHeight } = await initPageScroller(tabId);
 
-    const pageInfo = await getPageInfo(tabId);
+    const overlapPx = Math.round(viewportHeight * (overlapPct / 100));
+    const scrollStep = viewportHeight - overlapPx;
+    const estTotal = Math.max(1, Math.ceil((scrollHeight - overlapPx) / scrollStep));
+
+    updateState({ total: estTotal });
+    await sleep(SCROLL_SETTLE_MS);
+
+    const screenshots = await captureLoop(
+      tabId, null,
+      () => scrollByStep(tabId, overlapPx),
+      estTotal, "Capturing part"
+    );
+
+    await scrollToTop(tabId);
+    await cdpDetach(tabId);
+    await buildAndDownload(tabId, format, screenshots, overlapPct);
+  } catch (err) {
+    await cdpDetach(tabId).catch(() => {});
+    updateState({ status: "error", error: err.message, phase: "Error" });
+    scheduleAutoReset("error", AUTO_RESET_ERROR_MS);
+  }
+}
+
+async function runAreaCapture(tabId, format, rect, overlapPct) {
+  try {
+    await cdpAttach(tabId);
+    const { scrollHeight } = await initPageScroller(tabId);
 
     const clip = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-
-    const overlap = Math.round(rect.height * (overlapPct / 100));
-    const scrollStep = rect.height - overlap;
-    const estTotal = Math.max(1, Math.ceil((pageInfo.scrollHeight - overlap) / scrollStep));
+    const overlapPx = Math.round(rect.height * (overlapPct / 100));
+    const scrollStep = rect.height - overlapPx;
+    const estTotal = Math.max(1, Math.ceil((scrollHeight - overlapPx) / scrollStep));
 
     updateState({ total: estTotal });
-    await sleep(500);
+    await sleep(SCROLL_SETTLE_MS);
 
-    const screenshots = [];
-    let partIndex = 0;
-    let reachedEnd = false;
-
-    while (true) {
-      partIndex++;
-      updateState({
-        current: partIndex,
-        total: Math.max(estTotal, partIndex),
-        phase: `Capturing area ${partIndex}...`,
-      });
-
-      const dataUrl = await captureTab(tabId, clip);
-      screenshots.push(dataUrl);
-
-      if (reachedEnd) break;
-
-      const result = await scrollByAmount(tabId, scrollStep);
-      reachedEnd = result.done;
-      await sleep(MIN_CAPTURE_INTERVAL);
-    }
+    const screenshots = await captureLoop(
+      tabId, clip,
+      () => scrollByAmount(tabId, scrollStep),
+      estTotal, "Capturing area"
+    );
 
     await scrollToTop(tabId);
-    await debuggerDetach(tabId);
-
-    // Build output
-    const phaseLabel = { pdf: "Generating PDF...", longpdf: "Stitching Long PDF...", zip: "Packing ZIP..." };
-    updateState({
-      status: "packing",
-      phase: phaseLabel[format] || "Packing...",
-    });
-
-    const tab = await chrome.tabs.get(tabId);
-    let hostname = "page";
-    try {
-      hostname = new URL(tab.url).hostname.replace(/[^a-z0-9]/gi, "_");
-    } catch (e) {}
-    const timestamp = new Date()
-      .toISOString()
-      .replace(/[:.]/g, "-")
-      .slice(0, 19);
-
-    let filename;
-    if (format === "longpdf") {
-      filename = `fullpage_${hostname}_${timestamp}.pdf`;
-      await buildAndDownloadLongPDF(screenshots, filename, overlapPct);
-    } else if (format === "pdf") {
-      filename = `capture_${hostname}_${timestamp}.pdf`;
-      await buildAndDownloadPDF(screenshots, filename);
-    } else {
-      filename = `captures_${hostname}_${timestamp}.zip`;
-      await buildAndDownloadZIP(screenshots, filename);
-    }
-
-    updateState({
-      status: "done",
-      phase: "Completed",
-      downloadFilename: filename,
-    });
-
-    setTimeout(() => {
-      if (captureState.status === "done") resetToIdle();
-    }, 30000);
+    await cdpDetach(tabId);
+    await buildAndDownload(tabId, format, screenshots, overlapPct);
   } catch (err) {
-    await debuggerDetach(tabId).catch(() => {});
+    await cdpDetach(tabId).catch(() => {});
     updateState({ status: "error", error: err.message, phase: "Error" });
-    setTimeout(() => {
-      if (captureState.status === "error") resetToIdle();
-    }, 10000);
+    scheduleAutoReset("error", AUTO_RESET_ERROR_MS);
   }
 }
 
-// ── Full page capture flow ────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Output building & download
+// ═══════════════════════════════════════════════════════════════════
 
-async function startCapture(tabId, format, overlapPct) {
-  const MIN_CAPTURE_INTERVAL = 600;
+async function buildAndDownload(tabId, format, screenshots, overlapPct) {
+  updateState({
+    status: "packing",
+    phase: FORMAT_LABELS[format] || "Packing...",
+  });
 
+  const filename = generateFilename(tabId, format);
+  const builders = {
+    longpdf: () => buildLongPDF(screenshots, overlapPct),
+    pdf: () => buildMultiPagePDF(screenshots),
+    zip: () => buildZIP(screenshots),
+  };
+
+  const blob = await (builders[format] || builders.zip)();
+  await downloadBlob(blob, await filename);
+
+  updateState({
+    status: "done",
+    phase: "Completed",
+    downloadFilename: await filename,
+  });
+  scheduleAutoReset("done", AUTO_RESET_DONE_MS);
+}
+
+async function generateFilename(tabId, format) {
+  const tab = await chrome.tabs.get(tabId);
+  let hostname = "page";
   try {
-    await debuggerAttach(tabId);
+    hostname = new URL(tab.url).hostname.replace(/[^a-z0-9]/gi, "_");
+  } catch (_) {}
+  const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
 
-    const pageInfo = await getPageInfo(tabId);
-    const { scrollHeight, viewportHeight } = pageInfo;
-    const overlap = Math.round(viewportHeight * (overlapPct / 100));
-    const scrollStep = viewportHeight - overlap;
-    const estTotal = Math.max(1, Math.ceil((scrollHeight - overlap) / scrollStep));
+  const prefixes = { longpdf: "fullpage", pdf: "screenshot", zip: "screenshots" };
+  const exts = { longpdf: "pdf", pdf: "pdf", zip: "zip" };
+  const prefix = prefixes[format] || "capture";
+  const ext = exts[format] || "zip";
 
-    updateState({ total: estTotal });
-    await sleep(500);
-
-    const screenshots = [];
-    let partIndex = 0;
-    let reachedEnd = false;
-
-    while (true) {
-      partIndex++;
-      updateState({
-        current: partIndex,
-        total: Math.max(estTotal, partIndex),
-        phase: `Capturing part ${partIndex}...`,
-      });
-
-      const dataUrl = await captureTab(tabId);
-      screenshots.push(dataUrl);
-
-      if (reachedEnd) break;
-
-      const result = await scrollDown(tabId, overlap);
-      reachedEnd = result.done;
-      await sleep(MIN_CAPTURE_INTERVAL);
-    }
-
-    await scrollToTop(tabId);
-    await debuggerDetach(tabId);
-
-    const phaseLabel = { pdf: "Generating PDF...", longpdf: "Stitching Long PDF...", zip: "Packing ZIP..." };
-    updateState({
-      status: "packing",
-      phase: phaseLabel[format] || "Packing...",
-    });
-
-    const tab = await chrome.tabs.get(tabId);
-    let hostname = "page";
-    try {
-      hostname = new URL(tab.url).hostname.replace(/[^a-z0-9]/gi, "_");
-    } catch (e) {}
-    const timestamp = new Date()
-      .toISOString()
-      .replace(/[:.]/g, "-")
-      .slice(0, 19);
-
-    let filename;
-    if (format === "longpdf") {
-      filename = `fullpage_${hostname}_${timestamp}.pdf`;
-      await buildAndDownloadLongPDF(screenshots, filename, overlapPct);
-    } else if (format === "pdf") {
-      filename = `screenshot_${hostname}_${timestamp}.pdf`;
-      await buildAndDownloadPDF(screenshots, filename);
-    } else {
-      filename = `screenshots_${hostname}_${timestamp}.zip`;
-      await buildAndDownloadZIP(screenshots, filename);
-    }
-
-    updateState({
-      status: "done",
-      phase: "Completed",
-      downloadFilename: filename,
-    });
-
-    setTimeout(() => {
-      if (captureState.status === "done") resetToIdle();
-    }, 30000);
-  } catch (err) {
-    await debuggerDetach(tabId).catch(() => {});
-    updateState({ status: "error", error: err.message, phase: "Error" });
-
-    setTimeout(() => {
-      if (captureState.status === "error") resetToIdle();
-    }, 10000);
-  }
+  return `${prefix}_${hostname}_${ts}.${ext}`;
 }
 
-// ── Output builders ───────────────────────────────────────────────
-
-async function buildAndDownloadZIP(screenshots, filename) {
+async function buildZIP(screenshots) {
   const zip = new JSZip();
   for (let i = 0; i < screenshots.length; i++) {
-    const base64Data = screenshots[i].split(",")[1];
-    const padded = String(i + 1).padStart(3, "0");
-    zip.file(`screenshot_${padded}.png`, base64Data, { base64: true });
+    const base64 = screenshots[i].split(",")[1];
+    zip.file(`screenshot_${String(i + 1).padStart(3, "0")}.png`, base64, { base64: true });
   }
-
-  const blob = await zip.generateAsync({ type: "blob" });
-  await downloadBlob(blob, filename);
+  return zip.generateAsync({ type: "blob" });
 }
 
-async function buildAndDownloadLongPDF(screenshots, filename, overlapPct) {
-  const { width: imgW, height: imgH } = getPngDimensions(screenshots[0]);
+function buildMultiPagePDF(screenshots) {
+  const { width, height } = getPngDimensions(screenshots[0]);
+  const widthMM = PDF_WIDTH_MM;
+  const heightMM = (height / width) * widthMM;
 
-  const pdfWidthMM = 210;
-  const scale = pdfWidthMM / imgW;
+  const { jsPDF } = jspdf;
+  const pdf = new jsPDF({
+    orientation: width > height ? "landscape" : "portrait",
+    unit: "mm",
+    format: [widthMM, heightMM],
+  });
+
+  for (let i = 0; i < screenshots.length; i++) {
+    if (i > 0) pdf.addPage([widthMM, heightMM]);
+    pdf.addImage(screenshots[i], "PNG", 0, 0, widthMM, heightMM);
+  }
+  return pdf.output("blob");
+}
+
+function buildLongPDF(screenshots, overlapPct) {
+  const { width: imgW, height: imgH } = getPngDimensions(screenshots[0]);
+  const scale = PDF_WIDTH_MM / imgW;
   const imgHMM = imgH * scale;
 
-  // Overlap in image pixels → mm, plus 1mm buffer to prevent seam gaps
-  const overlapPx = Math.round(imgH * (overlapPct / 100));
-  const overlapMM = overlapPx * scale + 1;
-
-  // Effective step per image in mm
+  const overlapMM = Math.round(imgH * (overlapPct / 100)) * scale + LONG_PDF_SEAM_BUFFER_MM;
   const stepMM = imgHMM - overlapMM;
-
-  // Total page height
   const totalHMM = imgHMM + stepMM * (screenshots.length - 1);
 
   const { jsPDF } = jspdf;
   const pdf = new jsPDF({
     orientation: "portrait",
     unit: "mm",
-    format: [pdfWidthMM, totalHMM],
+    format: [PDF_WIDTH_MM, totalHMM],
   });
 
   for (let i = 0; i < screenshots.length; i++) {
-    // Each image is placed at stepMM intervals
-    // Later images paint over the overlap of previous ones → seamless
-    const yMM = i * stepMM;
-    pdf.addImage(screenshots[i], "PNG", 0, yMM, pdfWidthMM, imgHMM);
+    pdf.addImage(screenshots[i], "PNG", 0, i * stepMM, PDF_WIDTH_MM, imgHMM);
   }
-
-  const blob = pdf.output("blob");
-  await downloadBlob(blob, filename);
+  return pdf.output("blob");
 }
 
-async function buildAndDownloadPDF(screenshots, filename) {
-  const { width: imgWidthPx, height: imgHeightPx } = getPngDimensions(
-    screenshots[0]
-  );
+// ═══════════════════════════════════════════════════════════════════
+// Utilities
+// ═══════════════════════════════════════════════════════════════════
 
-  const pdfWidthMM = 210;
-  const pdfHeightMM = (imgHeightPx / imgWidthPx) * pdfWidthMM;
-
-  const { jsPDF } = jspdf;
-  const pdf = new jsPDF({
-    orientation: imgWidthPx > imgHeightPx ? "landscape" : "portrait",
-    unit: "mm",
-    format: [pdfWidthMM, pdfHeightMM],
-  });
-
-  for (let i = 0; i < screenshots.length; i++) {
-    if (i > 0) {
-      pdf.addPage([pdfWidthMM, pdfHeightMM]);
-    }
-    pdf.addImage(screenshots[i], "PNG", 0, 0, pdfWidthMM, pdfHeightMM);
-  }
-
-  const blob = pdf.output("blob");
-  await downloadBlob(blob, filename);
-}
-
-// ── Utilities ─────────────────────────────────────────────────────
-
+/** Read width/height from the IHDR chunk of a PNG data-URL (bytes 16–23). */
 function getPngDimensions(dataUrl) {
-  const base64 = dataUrl.split(",")[1];
-  const binary = atob(base64);
-  const width =
-    (binary.charCodeAt(16) << 24) |
-    (binary.charCodeAt(17) << 16) |
-    (binary.charCodeAt(18) << 8) |
-    binary.charCodeAt(19);
-  const height =
-    (binary.charCodeAt(20) << 24) |
-    (binary.charCodeAt(21) << 16) |
-    (binary.charCodeAt(22) << 8) |
-    binary.charCodeAt(23);
-  return { width, height };
+  const bin = atob(dataUrl.split(",")[1]);
+  const u32 = (offset) =>
+    (bin.charCodeAt(offset) << 24) |
+    (bin.charCodeAt(offset + 1) << 16) |
+    (bin.charCodeAt(offset + 2) << 8) |
+    bin.charCodeAt(offset + 3);
+  return { width: u32(16), height: u32(20) };
 }
 
 async function downloadBlob(blob, filename) {
-  const reader = new FileReader();
   const dataUrl = await new Promise((resolve) => {
+    const reader = new FileReader();
     reader.onloadend = () => resolve(reader.result);
     reader.readAsDataURL(blob);
   });
-
-  await chrome.downloads.download({
-    url: dataUrl,
-    filename: filename,
-  });
+  await chrome.downloads.download({ url: dataUrl, filename });
 }
 
 function broadcastMessage(message) {

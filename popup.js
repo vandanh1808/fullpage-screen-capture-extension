@@ -1,26 +1,36 @@
-const startBtn = document.getElementById("startBtn");
-const startBtnLabel = document.getElementById("startBtnLabel");
-const statusEl = document.getElementById("status");
-const progressPanel = document.getElementById("progressPanel");
-const progressBar = document.getElementById("progressBar");
-const progressPct = document.getElementById("progressPct");
-const progressLabel = document.getElementById("progressLabel");
-const progressParts = document.getElementById("progressParts");
-const progressETA = document.getElementById("progressETA");
-const overlapRange = document.getElementById("overlapRange");
-const overlapValue = document.getElementById("overlapValue");
+// ═══════════════════════════════════════════════════════════════════
+// DOM references
+// ═══════════════════════════════════════════════════════════════════
 
-let captureStartTime = 0;
+const $ = (id) => document.getElementById(id);
 
-// ── Toggle buttons ───────────────────────────────────────────────
+const dom = {
+  startBtn: $("startBtn"),
+  startBtnLabel: $("startBtnLabel"),
+  status: $("status"),
+  progressPanel: $("progressPanel"),
+  progressBar: $("progressBar"),
+  progressPct: $("progressPct"),
+  progressLabel: $("progressLabel"),
+  progressParts: $("progressParts"),
+  progressETA: $("progressETA"),
+  overlapRange: $("overlapRange"),
+  overlapValue: $("overlapValue"),
+};
+
+const FORMAT_DISPLAY = { pdf: "PDF", longpdf: "Long PDF", zip: "ZIP" };
+
+// ═══════════════════════════════════════════════════════════════════
+// Toggle groups
+// ═══════════════════════════════════════════════════════════════════
 
 document.querySelectorAll(".toggle-group").forEach((group) => {
-  group.querySelectorAll(".toggle-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      group.querySelectorAll(".toggle-btn").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      onSettingsChange();
-    });
+  group.addEventListener("click", (e) => {
+    const btn = e.target.closest(".toggle-btn");
+    if (!btn) return;
+    group.querySelectorAll(".toggle-btn").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    onSettingsChange();
   });
 });
 
@@ -29,52 +39,54 @@ function getToggleValue(groupId) {
 }
 
 function setToggleValue(groupId, value) {
-  const group = document.getElementById(groupId);
+  const group = $(groupId);
   if (!group) return;
   group.querySelectorAll(".toggle-btn").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.value === value);
   });
 }
 
-// ── Overlap slider ───────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Settings
+// ═══════════════════════════════════════════════════════════════════
 
-overlapRange.addEventListener("input", () => {
-  overlapValue.textContent = overlapRange.value + "%";
+dom.overlapRange.addEventListener("input", () => {
+  dom.overlapValue.textContent = dom.overlapRange.value + "%";
 });
 
-// ── Settings change ──────────────────────────────────────────────
-
 function onSettingsChange() {
-  const mode = getToggleValue("modeToggle");
-  startBtnLabel.textContent = mode === "area" ? "Select Area & Capture" : "Start Capture";
+  const isArea = getToggleValue("modeToggle") === "area";
+  dom.startBtnLabel.textContent = isArea ? "Select Area & Capture" : "Start Capture";
 }
 
-// ── UI helpers ────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// UI helpers
+// ═══════════════════════════════════════════════════════════════════
 
 function setStatus(text, type = "info") {
-  statusEl.textContent = text;
-  statusEl.className = "status " + type;
-  statusEl.classList.remove("hidden");
+  dom.status.textContent = text;
+  dom.status.className = "status " + type;
+  dom.status.classList.remove("hidden");
 }
 
-function hideStatus() { statusEl.classList.add("hidden"); }
-function showProgress() { progressPanel.classList.remove("hidden"); }
-function hideProgress() { progressPanel.classList.add("hidden"); }
+function hideStatus() { dom.status.classList.add("hidden"); }
+function showProgress() { dom.progressPanel.classList.remove("hidden"); }
+function hideProgress() { dom.progressPanel.classList.add("hidden"); }
 
 function updateProgress(current, total, eta) {
   const pct = total > 0 ? Math.round((current / total) * 100) : 0;
-  progressBar.style.width = pct + "%";
-  progressPct.textContent = pct + "%";
-  progressParts.textContent = `${current} / ${total}`;
-  progressETA.textContent = eta || "--";
+  dom.progressBar.style.width = pct + "%";
+  dom.progressPct.textContent = pct + "%";
+  dom.progressParts.textContent = `${current} / ${total}`;
+  dom.progressETA.textContent = eta || "--";
 }
 
 function formatETA(seconds) {
   if (seconds <= 0) return "Almost done...";
   if (seconds < 60) return `~${Math.ceil(seconds)}s left`;
-  const min = Math.floor(seconds / 60);
-  const sec = Math.ceil(seconds % 60);
-  return `~${min}m ${sec}s left`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.ceil(seconds % 60);
+  return `~${m}m ${s}s left`;
 }
 
 function computeETA(current, total, startTime) {
@@ -83,110 +95,105 @@ function computeETA(current, total, startTime) {
   return formatETA((elapsed / current) * (total - current));
 }
 
-// ── Render state from background ──────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// State rendering
+// ═══════════════════════════════════════════════════════════════════
 
 function renderState(state) {
   if (state.mode) setToggleValue("modeToggle", state.mode);
   if (state.format) setToggleValue("formatToggle", state.format);
   if (state.overlap !== undefined) {
-    overlapRange.value = state.overlap;
-    overlapValue.textContent = state.overlap + "%";
+    dom.overlapRange.value = state.overlap;
+    dom.overlapValue.textContent = state.overlap + "%";
   }
   onSettingsChange();
 
-  if (state.status === "idle") {
-    startBtn.disabled = false;
-    hideProgress();
-    hideStatus();
-  } else if (state.status === "selecting") {
-    startBtn.disabled = true;
-    hideProgress();
-    setStatus("Draw a rectangle on the page to capture", "info");
-  } else if (state.status === "capturing") {
-    startBtn.disabled = true;
-    showProgress();
-    progressLabel.textContent = state.phase;
-    updateProgress(state.current, state.total, computeETA(state.current, state.total, state.startTime));
-    hideStatus();
-  } else if (state.status === "packing") {
-    startBtn.disabled = true;
-    showProgress();
-    progressLabel.textContent = state.phase;
-    updateProgress(state.total, state.total, "Processing...");
-    hideStatus();
-  } else if (state.status === "done") {
-    startBtn.disabled = false;
-    showProgress();
-    progressLabel.textContent = "Completed";
-    updateProgress(state.total || 1, state.total || 1, "Done!");
-    const elapsed = ((Date.now() - state.startTime) / 1000).toFixed(1);
-    const labels = { pdf: "PDF", longpdf: "Long PDF", zip: "ZIP" };
-    const label = state.mode === "area" ? "Capture" : (labels[state.format] || "File");
-    setStatus(`${label} saved to Downloads! (${elapsed}s)`, "done");
-  } else if (state.status === "error") {
-    startBtn.disabled = false;
-    hideProgress();
-    setStatus("Error: " + state.error, "error");
-  }
+  const renderers = {
+    idle: () => {
+      dom.startBtn.disabled = false;
+      hideProgress();
+      hideStatus();
+    },
+    selecting: () => {
+      dom.startBtn.disabled = true;
+      hideProgress();
+      setStatus("Draw a rectangle on the page to capture", "info");
+    },
+    capturing: () => {
+      dom.startBtn.disabled = true;
+      showProgress();
+      dom.progressLabel.textContent = state.phase;
+      updateProgress(state.current, state.total, computeETA(state.current, state.total, state.startTime));
+      hideStatus();
+    },
+    packing: () => {
+      dom.startBtn.disabled = true;
+      showProgress();
+      dom.progressLabel.textContent = state.phase;
+      updateProgress(state.total, state.total, "Processing...");
+      hideStatus();
+    },
+    done: () => {
+      dom.startBtn.disabled = false;
+      showProgress();
+      dom.progressLabel.textContent = "Completed";
+      updateProgress(state.total || 1, state.total || 1, "Done!");
+      const elapsed = ((Date.now() - state.startTime) / 1000).toFixed(1);
+      const label = state.mode === "area" ? "Capture" : (FORMAT_DISPLAY[state.format] || "File");
+      setStatus(`${label} saved to Downloads! (${elapsed}s)`, "done");
+    },
+    error: () => {
+      dom.startBtn.disabled = false;
+      hideProgress();
+      setStatus("Error: " + state.error, "error");
+    },
+  };
+
+  (renderers[state.status] || renderers.idle)();
 }
 
-// ── Sync state on open ───────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Background communication
+// ═══════════════════════════════════════════════════════════════════
 
 chrome.runtime.sendMessage({ action: "getState" }, (response) => {
-  if (response && response.state) {
-    captureStartTime = response.state.startTime;
-    renderState(response.state);
-  }
+  if (response?.state) renderState(response.state);
 });
 
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.action === "stateUpdate" && msg.state) {
-    captureStartTime = msg.state.startTime;
-    renderState(msg.state);
-  }
+  if (msg.action === "stateUpdate" && msg.state) renderState(msg.state);
 });
 
-// ── Start capture ─────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Capture trigger
+// ═══════════════════════════════════════════════════════════════════
 
-startBtn.addEventListener("click", () => {
+dom.startBtn.addEventListener("click", () => {
   const mode = getToggleValue("modeToggle");
   const format = getToggleValue("formatToggle");
-  const overlap = parseInt(overlapRange.value);
+  const overlap = parseInt(dom.overlapRange.value);
 
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (!tabs[0]) {
-      setStatus("No active tab found", "error");
-      return;
-    }
-    const tabId = tabs[0].id;
+    if (!tabs[0]) return setStatus("No active tab found", "error");
 
-    if (mode === "area") {
-      chrome.runtime.sendMessage(
-        { action: "startAreaSelect", tabId, format, overlap },
-        (response) => {
-          if (chrome.runtime.lastError) {
-            setStatus("Error: " + chrome.runtime.lastError.message, "error");
-            return;
-          }
-          window.close();
-        }
-      );
-    } else {
-      startBtn.disabled = true;
+    const tabId = tabs[0].id;
+    const action = mode === "area" ? "startAreaSelect" : "startCapture";
+
+    if (mode !== "area") {
+      dom.startBtn.disabled = true;
       hideStatus();
       showProgress();
-      progressLabel.textContent = "Starting...";
+      dom.progressLabel.textContent = "Starting...";
       updateProgress(0, 0, "Estimating...");
-
-      chrome.runtime.sendMessage(
-        { action: "startCapture", tabId, format, overlap },
-        (response) => {
-          if (chrome.runtime.lastError) {
-            setStatus("Error: " + chrome.runtime.lastError.message, "error");
-            startBtn.disabled = false;
-          }
-        }
-      );
     }
+
+    chrome.runtime.sendMessage({ action, tabId, format, overlap }, (res) => {
+      if (chrome.runtime.lastError) {
+        setStatus("Error: " + chrome.runtime.lastError.message, "error");
+        dom.startBtn.disabled = false;
+        return;
+      }
+      if (mode === "area") window.close();
+    });
   });
 });
