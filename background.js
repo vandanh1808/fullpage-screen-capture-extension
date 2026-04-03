@@ -418,20 +418,19 @@ async function buildAndDownloadZIP(screenshots, filename) {
 async function buildAndDownloadLongPDF(screenshots, filename, overlapPct) {
   const { width: imgW, height: imgH } = getPngDimensions(screenshots[0]);
 
-  // Convert overlap percentage to pixels
-  const overlapPx = Math.round(imgH * (overlapPct / 100));
-  // Effective height per image after removing overlap
-  const effectiveH = imgH - overlapPx;
-
-  // Total stitched height: first image full + rest without overlap
-  const totalH = imgH + effectiveH * (screenshots.length - 1);
-
-  // PDF dimensions in mm (A4 width as reference)
   const pdfWidthMM = 210;
   const scale = pdfWidthMM / imgW;
   const imgHMM = imgH * scale;
-  const effectiveHMM = effectiveH * scale;
-  const totalHMM = totalH * scale;
+
+  // Overlap in image pixels → mm, plus 1mm buffer to prevent seam gaps
+  const overlapPx = Math.round(imgH * (overlapPct / 100));
+  const overlapMM = overlapPx * scale + 1;
+
+  // Effective step per image in mm
+  const stepMM = imgHMM - overlapMM;
+
+  // Total page height
+  const totalHMM = imgHMM + stepMM * (screenshots.length - 1);
 
   const { jsPDF } = jspdf;
   const pdf = new jsPDF({
@@ -441,7 +440,9 @@ async function buildAndDownloadLongPDF(screenshots, filename, overlapPct) {
   });
 
   for (let i = 0; i < screenshots.length; i++) {
-    const yMM = i * effectiveHMM;
+    // Each image is placed at stepMM intervals
+    // Later images paint over the overlap of previous ones → seamless
+    const yMM = i * stepMM;
     pdf.addImage(screenshots[i], "PNG", 0, yMM, pdfWidthMM, imgHMM);
   }
 
