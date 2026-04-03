@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Screen Capture</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <div class="header">
+      <div class="logo">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+          <circle cx="12" cy="13" r="4"/>
+        </svg>
+      </div>
+      <h1>Screen Capture</h1>
+    </div>
+
+    <!-- Mode toggle -->
+    <div class="toggle-row">
+      <label class="toggle-label">Mode</label>
+      <div class="toggle-group" id="modeToggle">
+        <button class="toggle-btn active" data-value="fullpage">Full Page</button>
+        <button class="toggle-btn" data-value="area">Select Area</button>
+      </div>
+    </div>
+
+    <!-- Format toggle -->
+    <div class="toggle-row">
+      <label class="toggle-label">Format</label>
+      <div class="toggle-group" id="formatToggle">
+        <button class="toggle-btn active" data-value="zip">ZIP</button>
+        <button class="toggle-btn" data-value="pdf">PDF</button>
+      </div>
+    </div>
+
+    <!-- Overlap slider -->
+    <div class="slider-row">
+      <label class="toggle-label">Overlap</label>
+      <div class="slider-wrap">
+        <input type="range" id="overlapRange" min="0" max="40" value="15" step="1">
+        <span id="overlapValue" class="slider-value">15%</span>
+      </div>
+    </div>
+
+    <!-- Capture Button -->
+    <button id="startBtn" class="btn-primary">
+      <span id="startBtnLabel">Start Capture</span>
+    </button>
+
+    <!-- Progress Panel -->
+    <div id="progressPanel" class="progress-panel hidden">
+      <div class="progress-header">
+        <span id="progressLabel">Capturing...</span>
+        <span id="progressPct">0%</span>
+      </div>
+      <div class="progress-track">
+        <div id="progressBar" class="progress-bar"></div>
+      </div>
+      <div class="progress-details">
+        <span id="progressParts">0 / 0</span>
+        <span id="progressETA">--</span>
+      </div>
+    </div>
+
+    <!-- Status -->
+    <div id="status" class="status hidden"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

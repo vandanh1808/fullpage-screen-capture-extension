@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -sL \"https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js\" -o \"c:/Users/ADMIN/workspace/Tool/fullpage-screen-capture-extension/libs/jszip.min.js\")",
+      "Bash(where python:*)",
+      "Bash(where py:*)",
+      "Bash(where node:*)",
+      "Bash(node -e ':*)",
+      "Bash(curl -sL \"https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.2/jspdf.umd.min.js\" -o \"c:/Users/ADMIN/workspace/Tool/fullpage-screen-capture-extension/libs/jspdf.umd.min.js\")",
+      "Bash(curl -sL \"https://unpkg.com/jspdf@2.5.2/dist/jspdf.umd.min.js\" -o \"c:/Users/ADMIN/workspace/Tool/fullpage-screen-capture-extension/libs/jspdf.umd.min.js\")"
+    ]
+  }
+}
