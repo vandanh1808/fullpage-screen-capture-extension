@@ -174,17 +174,20 @@ async function scrollDown(tabId, overlap) {
     `(() => {
       const scroller = window.__captureScroller;
       const overlapPx = ${overlap};
-      if (scroller) {
-        const step = scroller.clientHeight - overlapPx;
-        const maxScroll = scroller.scrollHeight - scroller.clientHeight;
-        scroller.scrollTop = Math.min(scroller.scrollTop + step, maxScroll);
-        return { done: scroller.scrollTop >= maxScroll - 2, scrollY: scroller.scrollTop };
-      } else {
-        const step = window.innerHeight - overlapPx;
-        const maxScroll = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight) - window.innerHeight;
-        window.scrollTo(0, Math.min(window.scrollY + step, maxScroll));
-        return { done: window.scrollY >= maxScroll - 2, scrollY: window.scrollY };
-      }
+      const vh = scroller ? scroller.clientHeight : window.innerHeight;
+      const currentScroll = scroller ? scroller.scrollTop : window.scrollY;
+      const totalHeight = scroller
+        ? scroller.scrollHeight
+        : Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+      const maxScroll = totalHeight - vh;
+      const step = vh - overlapPx;
+
+      const target = Math.min(currentScroll + step, maxScroll);
+      if (scroller) scroller.scrollTop = target;
+      else window.scrollTo(0, target);
+
+      const actual = scroller ? scroller.scrollTop : window.scrollY;
+      return { done: actual >= maxScroll - 2, scrollY: actual };
     })()`
   );
 }
@@ -263,9 +266,10 @@ async function startAreaCapture(tabId, format, rect, overlapPct) {
     await debuggerDetach(tabId);
 
     // Build output
+    const phaseLabel = { pdf: "Generating PDF...", longpdf: "Stitching Long PDF...", zip: "Packing ZIP..." };
     updateState({
       status: "packing",
-      phase: format === "pdf" ? "Generating PDF..." : "Packing ZIP...",
+      phase: phaseLabel[format] || "Packing...",
     });
 
     const tab = await chrome.tabs.get(tabId);
@@ -279,7 +283,10 @@ async function startAreaCapture(tabId, format, rect, overlapPct) {
       .slice(0, 19);
 
     let filename;
-    if (format === "pdf") {
+    if (format === "longpdf") {
+      filename = `fullpage_${hostname}_${timestamp}.pdf`;
+      await buildAndDownloadLongPDF(screenshots, filename, overlapPct);
+    } else if (format === "pdf") {
       filename = `capture_${hostname}_${timestamp}.pdf`;
       await buildAndDownloadPDF(screenshots, filename);
     } else {
@@ -347,9 +354,10 @@ async function startCapture(tabId, format, overlapPct) {
     await scrollToTop(tabId);
     await debuggerDetach(tabId);
 
+    const phaseLabel = { pdf: "Generating PDF...", longpdf: "Stitching Long PDF...", zip: "Packing ZIP..." };
     updateState({
       status: "packing",
-      phase: format === "pdf" ? "Generating PDF..." : "Packing ZIP...",
+      phase: phaseLabel[format] || "Packing...",
     });
 
     const tab = await chrome.tabs.get(tabId);
@@ -363,7 +371,10 @@ async function startCapture(tabId, format, overlapPct) {
       .slice(0, 19);
 
     let filename;
-    if (format === "pdf") {
+    if (format === "longpdf") {
+      filename = `fullpage_${hostname}_${timestamp}.pdf`;
+      await buildAndDownloadLongPDF(screenshots, filename, overlapPct);
+    } else if (format === "pdf") {
       filename = `screenshot_${hostname}_${timestamp}.pdf`;
       await buildAndDownloadPDF(screenshots, filename);
     } else {
@@ -401,6 +412,40 @@ async function buildAndDownloadZIP(screenshots, filename) {
   }
 
   const blob = await zip.generateAsync({ type: "blob" });
+  await downloadBlob(blob, filename);
+}
+
+async function buildAndDownloadLongPDF(screenshots, filename, overlapPct) {
+  const { width: imgW, height: imgH } = getPngDimensions(screenshots[0]);
+
+  // Convert overlap percentage to pixels
+  const overlapPx = Math.round(imgH * (overlapPct / 100));
+  // Effective height per image after removing overlap
+  const effectiveH = imgH - overlapPx;
+
+  // Total stitched height: first image full + rest without overlap
+  const totalH = imgH + effectiveH * (screenshots.length - 1);
+
+  // PDF dimensions in mm (A4 width as reference)
+  const pdfWidthMM = 210;
+  const scale = pdfWidthMM / imgW;
+  const imgHMM = imgH * scale;
+  const effectiveHMM = effectiveH * scale;
+  const totalHMM = totalH * scale;
+
+  const { jsPDF } = jspdf;
+  const pdf = new jsPDF({
+    orientation: "portrait",
+    unit: "mm",
+    format: [pdfWidthMM, totalHMM],
+  });
+
+  for (let i = 0; i < screenshots.length; i++) {
+    const yMM = i * effectiveHMM;
+    pdf.addImage(screenshots[i], "PNG", 0, yMM, pdfWidthMM, imgHMM);
+  }
+
+  const blob = pdf.output("blob");
   await downloadBlob(blob, filename);
 }
 

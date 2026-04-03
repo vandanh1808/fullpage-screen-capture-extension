@@ -120,7 +120,8 @@ function renderState(state) {
     progressLabel.textContent = "Completed";
     updateProgress(state.total || 1, state.total || 1, "Done!");
     const elapsed = ((Date.now() - state.startTime) / 1000).toFixed(1);
-    const label = state.mode === "area" ? "Capture" : state.format === "pdf" ? "PDF" : "ZIP";
+    const labels = { pdf: "PDF", longpdf: "Long PDF", zip: "ZIP" };
+    const label = state.mode === "area" ? "Capture" : (labels[state.format] || "File");
     setStatus(`${label} saved to Downloads! (${elapsed}s)`, "done");
   } else if (state.status === "error") {
     startBtn.disabled = false;
